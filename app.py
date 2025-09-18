@@ -23,7 +23,7 @@ OFFICIAL_DOMAINS = {
     "australia.gov.au","my.gov.au","mygovid.gov.au","servicesaustralia.gov.au",
     "ato.gov.au","business.gov.au","accc.gov.au","scamwatch.gov.au",
     "moneysmart.gov.au","asic.gov.au","abs.gov.au","afp.gov.au","humanservices.gov.au",
-    "austrac.gov.au",  # added
+    "austrac.gov.au",
     # AU states/territories
     "vic.gov.au","nsw.gov.au","qld.gov.au","wa.gov.au","sa.gov.au","tas.gov.au","act.gov.au","nt.gov.au",
     # VIC universities
@@ -108,10 +108,10 @@ BRAND_TOKENS = tokens_from_officials(OFFICIAL_DOMAINS) | {
     "bankwest","suncorp","macquarie","ubank","boq","amp",
     "telstra","optus","vodafone","tpg","iinet","aussiebroadband","amaysim",
     "auspost","startrack","energyaustralia","origin","agl",
-    "qantas","virgin","jetstar",
-    "google","youtube","gmail","microsoft","outlook","office","live",
-    "apple","icloud","itunes","facebook","instagram","whatsapp","meta",
-    "twitter","x","tiktok","linkedin","amazon","ebay","paypal","stripe","square","afterpay","zip",
+    "qantas","virgin","jetstar","google","youtube","gmail",
+    "microsoft","outlook","office","live","apple","icloud","itunes",
+    "facebook","instagram","whatsapp","meta","twitter","x","tiktok","linkedin",
+    "amazon","ebay","paypal","stripe","square","afterpay","zip",
     "austrac"
 }
 BRAND_TOKENS = {re.sub(r"[^a-z0-9]", "", t) for t in BRAND_TOKENS if t}
@@ -192,6 +192,32 @@ def t2_score_url(url: str):
         return float(proba)
     except Exception:
         return None
+
+# ---------------- Aggregation helpers (dynamic weights + hard gate) ----------------
+BASE_WEIGHTS = {"sender": 0.35, "content": 0.30, "url": 0.35}
+
+def aggregate_overall(sender_s: float, content_s: float, url_s: float,
+                      sender_present: bool, content_present: bool, url_present: bool) -> float:
+    """
+    Dynamically renormalize weights based on which components are present,
+    then apply a hard gate so overall is never below the worst URL.
+    """
+    parts = []
+    if sender_present:  parts.append(("sender", sender_s))
+    if content_present: parts.append(("content", content_s))
+    if url_present:     parts.append(("url", url_s))
+
+    if not parts:
+        overall = 0.0
+    else:
+        total_w = sum(BASE_WEIGHTS[name] for name, _ in parts)
+        overall = sum(BASE_WEIGHTS[name] * score for name, score in parts) / total_w
+
+    # Hard gate: don't let overall fall below the worst URL
+    if url_present:
+        overall = max(overall, url_s)
+
+    return round(float(max(0.0, min(1.0, overall))), 2)
 
 # ---------------- T1 URL scoring ----------------
 def score_url_t1(url: str) -> dict:
@@ -287,7 +313,7 @@ def score_url_t1(url: str) -> dict:
             "punycode": 0.15,
             "risky_keywords": 0.20,
             "suspicious_tld": 0.10,
-            "deep_subdomain": 0.05,   # reduced from 0.10 (C)
+            "deep_subdomain": 0.05,   # reduced from 0.10
             "ip_host": 0.25,
             "has_at": 0.10,
             "long_url": 0.05,
@@ -527,10 +553,16 @@ def email_check():
     content = content_score(html, url_items=url_items)
     sender = sender_score(headers if isinstance(headers, dict) else {})
 
-    # Aggregate overall risk (weights are tunable)
+    # Overall aggregation (dynamic weights + hard gate)
     url_max = max([it.get("risk_blended", it["risk"]) for it in url_items], default=0.0)
-    overall = 0.35 * sender["score"] + 0.30 * content["score"] + 0.35 * url_max
-    overall = round(float(max(0.0, min(1.0, overall))), 2)
+    sender_present = bool(headers) and any(k in headers for k in ("From","from","Reply-To","reply-to",
+                                                                  "Return-Path","return-path",
+                                                                  "Authentication-Results","authentication-results"))
+    content_present = True  # html is required here
+    url_present = len(url_items) > 0
+
+    overall = aggregate_overall(sender["score"], content["score"], url_max,
+                                sender_present, content_present, url_present)
 
     return jsonify({
         "overall_risk": overall,
@@ -617,10 +649,16 @@ def message_check():
     sender = sender_score(headers if isinstance(headers, dict) else {})
     content_obj = content_score_text(content_txt, url_items=url_items)
 
-    # Overall risk blend (same weights)
+    # Overall aggregation (dynamic weights + hard gate)
     url_max = max([it.get("risk_blended", it.get("risk", 0.0)) for it in url_items], default=0.0)
-    overall = 0.35 * sender["score"] + 0.30 * content_obj["score"] + 0.35 * url_max
-    overall = round(float(max(0.0, min(1.0, overall))), 2)
+    sender_present = bool(headers) and any(k in headers for k in ("From","from","Reply-To","reply-to",
+                                                                  "Return-Path","return-path",
+                                                                  "Authentication-Results","authentication-results"))
+    content_present = bool((content_txt or "").strip())
+    url_present = len(url_items) > 0
+
+    overall = aggregate_overall(sender["score"], content_obj["score"], url_max,
+                                sender_present, content_present, url_present)
 
     return jsonify({
         "overall_risk": overall,
