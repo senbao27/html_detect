@@ -1,0 +1,22 @@
+# Python venv & caches
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Git & editor junk
+.git
+.gitignore
+*.log
+*.sqlite
+*.ipynb
+*.DS_Store
+
+# Local data (don’t send big training sets to the image)
+data/*
+!data/README.md
+
+# Build artifacts (add more if you generate them)
+dist/
+build/
