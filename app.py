@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 # Flask API (T1-only + optional T2):
 # - URL/domain scoring (offline lexical rules, refined UGC handling, optional brand binding)
-# - Email (HTML) scoring: sender + content + URL blend
+# - Email HTML scoring: sender + content + URL blend  (/email/check)
+# - Plain-text message scoring: content + explicit URLs blend (/message/check)
 # - Optional T2 URL model auto-load (url_model.joblib) for lexical ML
 #
 # No external WHOIS/DNS/cert lookups are performed in this file.
@@ -209,6 +210,19 @@ def is_platform_ugc(host: str, e1: str, path: str) -> bool:
 def normalize_token(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
+def ensure_http_url(u: str) -> str:
+    """Add scheme if missing for 'www.' inputs; otherwise return as-is."""
+    if not isinstance(u, str):
+        return ""
+    u = u.strip()
+    if not u:
+        return ""
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+    if u.startswith("www."):
+        return "http://" + u
+    return u  # leave untouched; parser may fail if it's not absolute
+
 # ---------------- Optional T2 model ----------------
 URL_MODEL = None
 try:
@@ -361,7 +375,7 @@ def score_url_t1(url: str, brand: str | None = None) -> dict:
             "reasons": [f"Parse error: {type(e).__name__}: {e}"]
         }
 
-# ---------------- Content & sender scoring (for HTML emails) ----------------
+# ---------------- Content & sender scoring (HTML emails) ----------------
 ZW_CHARS = "[\u200b\u200c\u200d\u2060]"  # zero-width chars
 DOMAIN_RE = re.compile(r"\b([a-z0-9][a-z0-9\-\.]+\.[a-z]{2,})\b", re.I)
 
@@ -437,6 +451,46 @@ def content_score(html: str, brand: str | None, url_items: list[dict]) -> dict:
     reasons = list(dict.fromkeys(reasons))
     return {"score": round(float(score), 2), "reasons": reasons, "links": links, "forms": forms}
 
+# ---------------- Content scoring for plain text ----------------
+def content_score_text(content: str, brand: str | None, url_items: list[dict]) -> dict:
+    """Heuristics over plain-text content (no HTML parsing, no URL extraction)."""
+    txt = (content or "")
+    txt_l = txt.lower()
+    reasons = []
+    score = 0.0
+
+    # Risky words
+    risky_words = [w for w in RISK_WORDS if w in txt_l]
+    if risky_words:
+        score += min(0.25, 0.05 * len(risky_words))
+        reasons.append(f"Body contains high-risk words: {', '.join(sorted(risky_words))}")
+
+    # Zero-width characters (obfuscation)
+    if re.search(ZW_CHARS, txt):
+        score += 0.1
+        reasons.append("Body contains zero-width characters (possible obfuscation)")
+
+    # Count suspicious URLs (non-official and risky)
+    suspicious_links = sum(1 for it in url_items if (not it.get("official")) and it.get("risk", 0) >= 0.5)
+    if suspicious_links >= 1:
+        score += min(0.3, 0.15 * suspicious_links)
+        reasons.append(f"Contains suspicious links: {suspicious_links}")
+
+    # Brand mention vs destination mismatch (only if URLs were provided)
+    if brand:
+        brand_norm = normalize_token(brand)
+        brand_domains = BRAND_TO_DOMAINS.get(brand_norm, set())
+        if brand_domains and url_items:
+            any_brand_link = any(etld1(urlparse(it["url"]).hostname or "") in brand_domains for it in url_items)
+            if not any_brand_link:
+                score += 0.15
+                reasons.append(f"Mentions brand ({brand_norm}) but links do not target its official domains")
+
+    score = max(0.0, min(1.0, score))
+    reasons = list(dict.fromkeys(reasons))
+    return {"score": round(float(score), 2), "reasons": reasons}
+
+# ---------------- Sender scoring (optional; for headers) ----------------
 def sender_score(headers: dict, brand: str | None) -> dict:
     """Score sender using common headers. If headers are absent, return neutral."""
     reasons = []
@@ -504,7 +558,7 @@ def sender_score(headers: dict, brand: str | None) -> dict:
 def health():
     return "ok", 200
 
-# ---------------- API: email check ----------------
+# ---------------- API: email check (HTML) ----------------
 @app.post("/email/check")
 def email_check():
     """
@@ -514,6 +568,7 @@ def email_check():
       "headers": {"From":"...", ...},      // optional but recommended
       "brand": "ato"                       // optional brand hint
     }
+    HTML parsing extracts <a href> and <form>. This endpoint is for HTML emails/pages.
     """
     data = request.get_json(silent=True) or {}
     html = data.get("html", "")
@@ -564,7 +619,10 @@ def email_check():
 # ---------------- API: single URL check ----------------
 @app.get("/check")
 def check_url_get():
-    # GET /check?url=...&brand=...
+    """
+    GET /check?url=...&brand=...
+    Scores a single URL. Requires absolute http(s) URL.
+    """
     url = (request.args.get("url") or "").strip()
     brand = (request.args.get("brand") or "").strip() or None
     if not url:
@@ -576,6 +634,83 @@ def check_url_get():
             item["risk_t2"] = round(float(proba_t2), 2)
             item["risk_blended"] = round(float(0.6 * item["risk"] + 0.4 * proba_t2), 2)
     return jsonify(item)
+
+# ---------------- API: plain-text message check (NO URL extraction) ----------------
+@app.post("/message/check")
+def message_check():
+    """
+    Request JSON:
+    {
+      "content": "plain text (no HTML)",      // optional
+      "url": "https://...",                   // optional
+      "urls": ["https://...", "..."],         // optional
+      "headers": {"From":"...", ...},         // optional
+      "brand": "ato"                          // optional
+    }
+    Behavior:
+      - This endpoint DOES NOT extract URLs from content.
+      - If you want URLs scored, pass them explicitly via `url` or `urls`.
+      - Works with:
+          (1) content + one/many URLs,
+          (2) URLs only,
+          (3) content only.
+    """
+    data = request.get_json(silent=True) or {}
+    content_txt = data.get("content") or ""
+    headers = data.get("headers") or {}
+    brand = data.get("brand")
+
+    # Collect URL candidates ONLY from 'url' and 'urls' (no extraction from content)
+    url_candidates = []
+    if isinstance(data.get("urls"), list):
+        for u in data["urls"]:
+            v = ensure_http_url(u)
+            if v:
+                url_candidates.append(v)
+    if isinstance(data.get("url"), str):
+        v = ensure_http_url(data["url"])
+        if v:
+            url_candidates.append(v)
+
+    # Deduplicate while preserving order
+    seen = set()
+    deduped = []
+    for u in url_candidates:
+        if u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    url_candidates = deduped
+
+    # Score each URL (T1 + optional T2 when NOT official)
+    url_items = []
+    for u in url_candidates:
+        item = score_url_t1(u, brand=brand)
+        if not item.get("official", False):
+            proba_t2 = t2_score_url(u)
+            if proba_t2 is not None:
+                blended = 0.6 * item["risk"] + 0.4 * proba_t2
+                item["risk_t2"] = round(float(proba_t2), 2)
+                item["risk_blended"] = round(float(blended), 2)
+        url_items.append(item)
+
+    # Sender (optional) and content scoring (plain text)
+    sender = sender_score(headers if isinstance(headers, dict) else {}, brand=brand)
+    content_obj = content_score_text(content_txt, brand=brand, url_items=url_items)
+
+    # Overall risk blend (same weights)
+    url_max = max([it.get("risk_blended", it.get("risk", 0.0)) for it in url_items], default=0.0)
+    overall = 0.35 * sender["score"] + 0.30 * content_obj["score"] + 0.35 * url_max
+    overall = round(float(max(0.0, min(1.0, overall))), 2)
+
+    return jsonify({
+        "overall_risk": overall,
+        "sender": sender,
+        "content": {
+            "score": content_obj["score"],
+            "reasons": content_obj["reasons"]
+        },
+        "urls": url_items
+    })
 
 if __name__ == "__main__":
     # Dev run: python app.py
