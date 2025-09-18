@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Flask API (T1-only + optional T2):
-# - URL/domain scoring (offline lexical rules, refined UGC handling, optional brand binding)
+# Flask API (T1 rules + optional T2 model):
+# - URL scoring (offline lexical rules, refined UGC handling)
 # - Email HTML scoring: sender + content + URL blend  (/email/check)
 # - Plain-text message scoring: content + explicit URLs blend (/message/check)
 # - Optional T2 URL model auto-load (url_model.joblib) for lexical ML
@@ -17,12 +17,13 @@ import os
 app = Flask(__name__)
 
 # ---------------- First-party official domains (eTLD+1) ----------------
-# Any subdomain of a whitelisted eTLD+1 is considered official.
+# Any subdomain of a whitelisted eTLD+1 is considered official (unless UGC).
 OFFICIAL_DOMAINS = {
     # AU Federal & national services
     "australia.gov.au","my.gov.au","mygovid.gov.au","servicesaustralia.gov.au",
     "ato.gov.au","business.gov.au","accc.gov.au","scamwatch.gov.au",
     "moneysmart.gov.au","asic.gov.au","abs.gov.au","afp.gov.au","humanservices.gov.au",
+    "austrac.gov.au",  # added
     # AU states/territories
     "vic.gov.au","nsw.gov.au","qld.gov.au","wa.gov.au","sa.gov.au","tas.gov.au","act.gov.au","nt.gov.au",
     # VIC universities
@@ -47,6 +48,13 @@ OFFICIAL_DOMAINS = {
     # Airlines
     "qantas.com","virginaustralia.com","jetstar.com","airnewzealand.com",
 }
+
+# ---------------- Trusted public-sector/education suffixes (B) ----------------
+# If an eTLD+1 ends with one of these suffixes, treat it as official (unless UGC).
+TRUSTED_PUBLIC_SUFFIXES = (".gov.au", ".edu.au", ".gov")
+
+def is_trusted_public_suffix(e1: str) -> bool:
+    return any(e1.endswith(sfx) for sfx in TRUSTED_PUBLIC_SUFFIXES)
 
 # ---------------- UGC platforms (refined) ----------------
 # Keep eTLD+1 list STRICT (do NOT put "google.com" here to avoid over-blocking the homepage).
@@ -82,7 +90,7 @@ RISK_WORDS = {
 }
 SUSPICIOUS_TLDS = {"zip","top","xyz","gq","click","work","loan","cam","mom","bar","country"}
 
-# ---------------- Brand tokens & mapping ----------------
+# ---------------- Brand-like tokens (for similarity only; no user input) ----------------
 _tldx = tldextract.TLDExtract(suffix_list_urls=None)  # no PSL network fetch
 
 def tokens_from_officials(domains: set[str]) -> set[str]:
@@ -99,67 +107,14 @@ BRAND_TOKENS = tokens_from_officials(OFFICIAL_DOMAINS) | {
     "commbank","westpac","stgeorge","bankofmelbourne","banksa","bendigobank",
     "bankwest","suncorp","macquarie","ubank","boq","amp",
     "telstra","optus","vodafone","tpg","iinet","aussiebroadband","amaysim",
-    "auspost","startrack",
-    "energyaustralia","origin","agl",
+    "auspost","startrack","energyaustralia","origin","agl",
     "qantas","virgin","jetstar",
-    "google","youtube","gmail",
-    "microsoft","outlook","office","live",
-    "apple","icloud","itunes",
-    "facebook","instagram","whatsapp","meta",
-    "twitter","x","tiktok","linkedin",
-    "amazon","ebay","paypal","stripe","square","afterpay","zip",
+    "google","youtube","gmail","microsoft","outlook","office","live",
+    "apple","icloud","itunes","facebook","instagram","whatsapp","meta",
+    "twitter","x","tiktok","linkedin","amazon","ebay","paypal","stripe","square","afterpay","zip",
+    "austrac"
 }
 BRAND_TOKENS = {re.sub(r"[^a-z0-9]", "", t) for t in BRAND_TOKENS if t}
-
-BRAND_TO_DOMAINS = {
-    "ato":{"ato.gov.au"},
-    "mygov":{"my.gov.au","mygovid.gov.au","servicesaustralia.gov.au"},
-    "servicesaustralia":{"servicesaustralia.gov.au"},
-    "monash":{"monash.edu"},
-    "unimelb":{"unimelb.edu.au"},
-    "rmit":{"rmit.edu.au"},
-    "deakin":{"deakin.edu.au"},
-    "swinburne":{"swinburne.edu.au"},
-    "latrobe":{"latrobe.edu.au"},
-    "commbank":{"commbank.com.au"},
-    "nab":{"nab.com.au"},
-    "anz":{"anz.com"},
-    "westpac":{"westpac.com.au"},
-    "stgeorge":{"stgeorge.com.au"},
-    "bankofmelbourne":{"bankofmelbourne.com.au"},
-    "banksa":{"banksa.com.au"},
-    "bendigobank":{"bendigobank.com.au"},
-    "bankwest":{"bankwest.com.au"},
-    "ing":{"ing.com.au"},
-    "macquarie":{"macquarie.com"},
-    "suncorp":{"suncorp.com.au"},
-    "mebank":{"mebank.com.au"},
-    "boq":{"boq.com.au"},
-    "ubank":{"ubank.com.au"},
-    "amp":{"amp.com.au"},
-    "auspost":{"auspost.com.au"},
-    "telstra":{"telstra.com"},
-    "optus":{"optus.com.au"},
-    "vodafone":{"vodafone.com.au"},
-    "tpg":{"tpg.com.au"},
-    "iinet":{"iinet.net.au"},
-    "aussiebroadband":{"aussiebroadband.com.au"},
-    "amaysim":{"amaysim.com.au"},
-    "energyaustralia":{"energyaustralia.com.au"},
-    "origin":{"originenergy.com.au"},
-    "agl":{"agl.com.au"},
-    "qantas":{"qantas.com"},
-    "virgin":{"virginaustralia.com"},
-    "jetstar":{"jetstar.com"},
-    "airnewzealand":{"airnewzealand.com"},
-    "google":{"google.com","google.com.au"},
-    "microsoft":{"microsoft.com","office.com","live.com","outlook.com"},
-    "apple":{"apple.com","icloud.com"},
-    "paypal":{"paypal.com"},
-    "stripe":{"stripe.com"},
-    "amazon":{"amazon.com","amazon.com.au"},
-    "ebay":{"ebay.com.au"},
-}
 
 # ---------------- Utils ----------------
 def etld1(host: str) -> str:
@@ -182,7 +137,7 @@ def levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 def min_brand_similarity(hostname_core: str) -> float:
-    # return similarity in [0,1]; higher means more similar to some brand token
+    """Return similarity in [0,1]; higher means more similar to a known brand token."""
     if not BRAND_TOKENS or not hostname_core:
         return 0.0
     dmin = min(levenshtein(hostname_core, b) for b in BRAND_TOKENS)
@@ -207,21 +162,18 @@ def is_platform_ugc(host: str, e1: str, path: str) -> bool:
                 return True
     return False
 
-def normalize_token(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
-
-def ensure_http_url(u: str) -> str:
-    """Add scheme if missing for 'www.' inputs; otherwise return as-is."""
-    if not isinstance(u, str):
-        return ""
-    u = u.strip()
-    if not u:
-        return ""
-    if u.startswith("http://") or u.startswith("https://"):
-        return u
-    if u.startswith("www."):
-        return "http://" + u
-    return u  # leave untouched; parser may fail if it's not absolute
+def subdomain_depth(host: str, e1: str) -> int:
+    """
+    Return number of subdomain labels before the eTLD+1, excluding common 'www'/'m'.
+    Example: foo.bar.example.com -> e1=example.com -> depth=2 ('foo','bar')
+    """
+    if not host or not e1:
+        return 0
+    host_labels = host.split(".")
+    e1_labels = e1.split(".")
+    sub_labels = host_labels[: max(0, len(host_labels) - len(e1_labels))]
+    sub_labels = [x for x in sub_labels if x not in ("www", "m")]
+    return len(sub_labels)
 
 # ---------------- Optional T2 model ----------------
 URL_MODEL = None
@@ -242,7 +194,7 @@ def t2_score_url(url: str):
         return None
 
 # ---------------- T1 URL scoring ----------------
-def score_url_t1(url: str, brand: str | None = None) -> dict:
+def score_url_t1(url: str) -> dict:
     try:
         p = urlparse(url)
         host = (p.hostname or "").lower()
@@ -253,12 +205,15 @@ def score_url_t1(url: str, brand: str | None = None) -> dict:
         reasons = []
         signals = {}
 
-        # UGC detection and first-party official determination
+        # UGC detection and "official" determination (whitelist OR trusted suffix), then early exit
         ugc = is_platform_ugc(host, e1, p.path or "")
-        official = (e1 in OFFICIAL_DOMAINS) and (not ugc)
+        official_by_whitelist = (e1 in OFFICIAL_DOMAINS)
+        official_by_suffix   = is_trusted_public_suffix(e1)
+        official = (official_by_whitelist or official_by_suffix) and (not ugc)
+
         if official:
-            return {"url": url, "official": True, "etld1": e1, "risk": 0.0,
-                    "reasons": ["Matched official whitelist"]}
+            reason = "Matched official whitelist" if official_by_whitelist else "Trusted public-sector/education suffix"
+            return {"url": url, "official": True, "etld1": e1, "risk": 0.0, "reasons": [reason]}
 
         # UGC baseline signal
         if ugc:
@@ -267,7 +222,7 @@ def score_url_t1(url: str, brand: str | None = None) -> dict:
         else:
             signals["ugc_platform"] = 0.0
 
-        # Brand similarity
+        # Brand-like similarity to known tokens
         host_core = re.sub(r"[\W_]", "", host or "")
         sim = min_brand_similarity(host_core)
         signals["brand_similarity"] = sim
@@ -297,13 +252,16 @@ def score_url_t1(url: str, brand: str | None = None) -> dict:
         if signals["suspicious_tld"] > 0:
             reasons.append(f"Suspicious TLD: .{tld}")
 
-        # Deep subdomain
-        sub_count = host.count(".") - 1 if host else 0
-        signals["deep_subdomain"] = 0.6 if sub_count >= 2 else 0.0
-        if sub_count >= 2:
-            reasons.append(f"Deep subdomain ({sub_count+1} levels)")
+        # Deep subdomain (C): exempt trusted public suffixes; flag only when depth >= 3
+        depth = subdomain_depth(host, e1)
+        if is_trusted_public_suffix(e1):
+            signals["deep_subdomain"] = 0.0
+        else:
+            signals["deep_subdomain"] = 0.6 if depth >= 3 else 0.0
+            if depth >= 3:
+                reasons.append(f"Deep subdomain ({depth} labels before {e1})")
 
-        # IP host / '@' / long URL / many hyphens
+        # Other lexical red flags
         signals["ip_host"] = 0.7 if is_ip(host) else 0.0
         if signals["ip_host"] > 0:
             reasons.append("Using IP as hostname")
@@ -322,18 +280,6 @@ def score_url_t1(url: str, brand: str | None = None) -> dict:
         if hyphens >= 3:
             reasons.append("Too many hyphens in domain")
 
-        # Optional brand binding
-        if brand:
-            brand_norm = normalize_token(brand)
-            brand_domains = BRAND_TO_DOMAINS.get(brand_norm, set())
-            if brand_domains and (e1 not in brand_domains):
-                signals["brand_mismatch"] = 0.35
-                reasons.append(f"Brand mismatch (brand: {brand_norm}, domain: {e1})")
-            else:
-                signals["brand_mismatch"] = 0.0
-        else:
-            signals["brand_mismatch"] = 0.0
-
         # Weighted aggregation + sigmoid normalization to [0,1]
         weight = {
             "ugc_platform": 0.30,
@@ -341,21 +287,20 @@ def score_url_t1(url: str, brand: str | None = None) -> dict:
             "punycode": 0.15,
             "risky_keywords": 0.20,
             "suspicious_tld": 0.10,
-            "deep_subdomain": 0.10,
+            "deep_subdomain": 0.05,   # reduced from 0.10 (C)
             "ip_host": 0.25,
             "has_at": 0.10,
             "long_url": 0.05,
             "many_hyphens": 0.05,
-            "brand_mismatch": 0.30,
         }
         score_lin = sum(weight[k] * signals.get(k, 0.0) for k in weight)
         risk = 1 / (1 + math.exp(-3.0 * (score_lin - 0.5)))
 
-        # Reason ordering: brand/UGC first, then punycode, then others
+        # Reason ordering: UGC first, then punycode, then others
         reasons = list(dict.fromkeys(reasons))
         reasons_sorted = sorted(
             reasons,
-            key=lambda s: 0 if ("brand" in s.lower() or "ugc" in s.lower()) else (1 if "punycode" in s.lower() else 2)
+            key=lambda s: 0 if ("ugc" in s.lower()) else (1 if "punycode" in s.lower() else 2)
         )
 
         return {
@@ -391,7 +336,7 @@ def extract_links_and_forms(html: str):
     text = soup.get_text(separator=" ", strip=True)
     return links, forms, text
 
-def content_score(html: str, brand: str | None, url_items: list[dict]) -> dict:
+def content_score(html: str, url_items: list[dict]) -> dict:
     """Heuristics over email HTML body (no network)."""
     links, forms, text = extract_links_and_forms(html)
     text_l = (text or "").lower()
@@ -437,22 +382,12 @@ def content_score(html: str, brand: str | None, url_items: list[dict]) -> dict:
         score += min(0.3, 0.15 * suspicious_links)
         reasons.append(f"Contains suspicious links: {suspicious_links}")
 
-    # Brand mention vs destination mismatch (best-effort)
-    if brand:
-        brand_norm = normalize_token(brand)
-        brand_domains = BRAND_TO_DOMAINS.get(brand_norm, set())
-        if brand_domains:
-            any_brand_link = any(etld1(urlparse(it["url"]).hostname or "") in brand_domains for it in url_items)
-            if not any_brand_link and len(url_items) >= 1:
-                score += 0.15
-                reasons.append(f"Mentions brand ({brand_norm}) but links do not target its official domains")
-
     score = max(0.0, min(1.0, score))
     reasons = list(dict.fromkeys(reasons))
     return {"score": round(float(score), 2), "reasons": reasons, "links": links, "forms": forms}
 
 # ---------------- Content scoring for plain text ----------------
-def content_score_text(content: str, brand: str | None, url_items: list[dict]) -> dict:
+def content_score_text(content: str, url_items: list[dict]) -> dict:
     """Heuristics over plain-text content (no HTML parsing, no URL extraction)."""
     txt = (content or "")
     txt_l = txt.lower()
@@ -476,22 +411,12 @@ def content_score_text(content: str, brand: str | None, url_items: list[dict]) -
         score += min(0.3, 0.15 * suspicious_links)
         reasons.append(f"Contains suspicious links: {suspicious_links}")
 
-    # Brand mention vs destination mismatch (only if URLs were provided)
-    if brand:
-        brand_norm = normalize_token(brand)
-        brand_domains = BRAND_TO_DOMAINS.get(brand_norm, set())
-        if brand_domains and url_items:
-            any_brand_link = any(etld1(urlparse(it["url"]).hostname or "") in brand_domains for it in url_items)
-            if not any_brand_link:
-                score += 0.15
-                reasons.append(f"Mentions brand ({brand_norm}) but links do not target its official domains")
-
     score = max(0.0, min(1.0, score))
     reasons = list(dict.fromkeys(reasons))
     return {"score": round(float(score), 2), "reasons": reasons}
 
-# ---------------- Sender scoring (optional; for headers) ----------------
-def sender_score(headers: dict, brand: str | None) -> dict:
+# ---------------- Sender scoring (headers are optional) ----------------
+def sender_score(headers: dict) -> dict:
     """Score sender using common headers. If headers are absent, return neutral."""
     reasons = []
     score = 0.0
@@ -504,12 +429,6 @@ def sender_score(headers: dict, brand: str | None) -> dict:
     email_addr = (email_addr or "").lower()
     from_dom = email_addr.split("@")[-1] if "@" in email_addr else ""
     from_e1 = etld1(from_dom)
-
-    # Display name spoof (brand-looking name but non-matching domain)
-    name_norm = normalize_token(name)
-    if name_norm in BRAND_TO_DOMAINS and from_e1 not in BRAND_TO_DOMAINS[name_norm]:
-        score += 0.25
-        reasons.append(f"Display name suggests brand ({name_norm}) but From domain does not match ({from_e1})")
 
     # Reply-To mismatch
     if reply_to:
@@ -539,19 +458,25 @@ def sender_score(headers: dict, brand: str | None) -> dict:
             score -= 0.1  # small relief only
             reasons.append("Authentication pass signal (DMARC/SPF/DKIM)")
 
-    # Optional brand binding
-    if brand:
-        bn = normalize_token(brand)
-        bdoms = BRAND_TO_DOMAINS.get(bn, set())
-        if bdoms and from_e1 and (from_e1 not in bdoms):
-            score += 0.25
-            reasons.append(f"Brand mismatch (brand: {bn}, From domain: {from_e1})")
-
     score = max(0.0, min(1.0, score))
     reasons = list(dict.fromkeys(reasons))
     return {"score": round(float(score), 2),
             "from": {"name": name, "email": email_addr, "etld1": from_e1},
             "reasons": reasons}
+
+# ---------------- Helpers ----------------
+def ensure_http_url(u: str) -> str:
+    """Add scheme if missing for 'www.' inputs; otherwise return as-is."""
+    if not isinstance(u, str):
+        return ""
+    u = u.strip()
+    if not u:
+        return ""
+    if u.startswith("http://") or u.startswith("https://"):
+        return u
+    if u.startswith("www."):
+        return "http://" + u
+    return u  # may be invalid; parser will handle
 
 # ---------------- API: health ----------------
 @app.get("/health")
@@ -565,15 +490,13 @@ def email_check():
     Request JSON:
     {
       "html": "<html>...</html>",          // required
-      "headers": {"From":"...", ...},      // optional but recommended
-      "brand": "ato"                       // optional brand hint
+      "headers": {"From":"...", ...}       // optional but recommended
     }
     HTML parsing extracts <a href> and <form>. This endpoint is for HTML emails/pages.
     """
     data = request.get_json(silent=True) or {}
     html = data.get("html", "")
     headers = data.get("headers") or {}
-    brand = data.get("brand")
 
     if not html:
         return jsonify(error="missing 'html' field"), 400
@@ -591,7 +514,7 @@ def email_check():
     # T1 (+ optional T2) for each URL
     url_items = []
     for u in url_candidates:
-        item = score_url_t1(u, brand=brand)
+        item = score_url_t1(u)
         if not item.get("official", False):
             proba_t2 = t2_score_url(u)
             if proba_t2 is not None:
@@ -601,8 +524,8 @@ def email_check():
         url_items.append(item)
 
     # Content & sender scoring
-    content = content_score(html, brand=brand, url_items=url_items)
-    sender = sender_score(headers if isinstance(headers, dict) else {}, brand=brand)
+    content = content_score(html, url_items=url_items)
+    sender = sender_score(headers if isinstance(headers, dict) else {})
 
     # Aggregate overall risk (weights are tunable)
     url_max = max([it.get("risk_blended", it["risk"]) for it in url_items], default=0.0)
@@ -620,14 +543,13 @@ def email_check():
 @app.get("/check")
 def check_url_get():
     """
-    GET /check?url=...&brand=...
+    GET /check?url=...
     Scores a single URL. Requires absolute http(s) URL.
     """
     url = (request.args.get("url") or "").strip()
-    brand = (request.args.get("brand") or "").strip() or None
     if not url:
         return jsonify(error="missing 'url' query param"), 400
-    item = score_url_t1(url, brand=brand)
+    item = score_url_t1(url)
     if not item.get("official", False):
         proba_t2 = t2_score_url(url)
         if proba_t2 is not None:
@@ -644,8 +566,7 @@ def message_check():
       "content": "plain text (no HTML)",      // optional
       "url": "https://...",                   // optional
       "urls": ["https://...", "..."],         // optional
-      "headers": {"From":"...", ...},         // optional
-      "brand": "ato"                          // optional
+      "headers": {"From":"...", ...}          // optional
     }
     Behavior:
       - This endpoint DOES NOT extract URLs from content.
@@ -658,9 +579,8 @@ def message_check():
     data = request.get_json(silent=True) or {}
     content_txt = data.get("content") or ""
     headers = data.get("headers") or {}
-    brand = data.get("brand")
 
-    # Collect URL candidates ONLY from 'url' and 'urls' (no extraction from content)
+    # Collect URL candidates ONLY from 'url' and 'urls'
     url_candidates = []
     if isinstance(data.get("urls"), list):
         for u in data["urls"]:
@@ -684,7 +604,7 @@ def message_check():
     # Score each URL (T1 + optional T2 when NOT official)
     url_items = []
     for u in url_candidates:
-        item = score_url_t1(u, brand=brand)
+        item = score_url_t1(u)
         if not item.get("official", False):
             proba_t2 = t2_score_url(u)
             if proba_t2 is not None:
@@ -694,8 +614,8 @@ def message_check():
         url_items.append(item)
 
     # Sender (optional) and content scoring (plain text)
-    sender = sender_score(headers if isinstance(headers, dict) else {}, brand=brand)
-    content_obj = content_score_text(content_txt, brand=brand, url_items=url_items)
+    sender = sender_score(headers if isinstance(headers, dict) else {})
+    content_obj = content_score_text(content_txt, url_items=url_items)
 
     # Overall risk blend (same weights)
     url_max = max([it.get("risk_blended", it.get("risk", 0.0)) for it in url_items], default=0.0)
