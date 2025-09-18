@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Flask API (T1-only + optional T2):
-# - URL/domain scoring (offline lexical rules, UGC platform handling, optional brand binding)
+# - URL/domain scoring (offline lexical rules, refined UGC handling, optional brand binding)
 # - Email (HTML) scoring: sender + content + URL blend
 # - Optional T2 URL model auto-load (url_model.joblib) for lexical ML
 #
@@ -47,16 +47,22 @@ OFFICIAL_DOMAINS = {
     "qantas.com","virginaustralia.com","jetstar.com","airnewzealand.com",
 }
 
-# ---------------- UGC platforms (do NOT auto-trust as official) ----------------
-# These are legitimate platforms where users can host arbitrary content.
+# ---------------- UGC platforms (refined) ----------------
+# Keep eTLD+1 list STRICT (do NOT put "google.com" here to avoid over-blocking the homepage).
 PLATFORM_UGC_ETLD1 = {
-    "google.com",   # docs/sites/drive.*
-    "forms.gle",
+    "forms.gle",        # Google Forms short links -> always UGC
     "dropbox.com",
-    "notion.site","notion.so",
+    "notion.site", "notion.so",
     "wixsite.com",
     "github.io",
-    "medium.com","substack.com",
+    "medium.com", "substack.com",
+}
+
+# Google subdomains that host UGC. Treat as UGC only on these hosts.
+UGC_GOOGLE_HOSTS = {
+    "docs.google.com",
+    "sites.google.com",   # site builder; treat as UGC regardless of path
+    "drive.google.com",
 }
 
 # URL path patterns that commonly indicate hosted forms/pages collecting data
@@ -182,10 +188,19 @@ def min_brand_similarity(hostname_core: str) -> float:
     return 1.0 - (dmin / max(len(hostname_core), 1))
 
 def is_platform_ugc(host: str, e1: str, path: str) -> bool:
-    # mark as UGC when eTLD+1 is a known platform or *.google.com with forms/docs paths
+    """
+    Return True if URL looks like UGC (user-generated content) hosted on a platform.
+    Rules:
+      - eTLD+1 in PLATFORM_UGC_ETLD1 -> UGC (e.g., forms.gle, github.io, notion.so)
+      - For Google, only specific subdomains are UGC (docs/sites/drive).
+        * sites.google.com -> always UGC
+        * docs/drive.google.com -> UGC when path matches known patterns
+    """
     if e1 in PLATFORM_UGC_ETLD1:
         return True
-    if host.endswith(".google.com"):
+    if host in UGC_GOOGLE_HOSTS:
+        if host == "sites.google.com":
+            return True
         for pat in UGC_PATH_PATTERNS:
             if pat.search(path or ""):
                 return True
@@ -497,8 +512,7 @@ def email_check():
     {
       "html": "<html>...</html>",          // required
       "headers": {"From":"...", ...},      // optional but recommended
-      "brand": "ato",                      // optional brand hint
-      "extract_urls_from_html_only": true  // reserved flag, not used here
+      "brand": "ato"                       // optional brand hint
     }
     """
     data = request.get_json(silent=True) or {}
@@ -523,11 +537,12 @@ def email_check():
     url_items = []
     for u in url_candidates:
         item = score_url_t1(u, brand=brand)
-        proba_t2 = t2_score_url(u)
-        if proba_t2 is not None:
-            blended = 0.6 * item["risk"] + 0.4 * proba_t2
-            item["risk_t2"] = round(float(proba_t2), 2)
-            item["risk_blended"] = round(float(blended), 2)
+        if not item.get("official", False):
+            proba_t2 = t2_score_url(u)
+            if proba_t2 is not None:
+                blended = 0.6 * item["risk"] + 0.4 * proba_t2
+                item["risk_t2"] = round(float(proba_t2), 2)
+                item["risk_blended"] = round(float(blended), 2)
         url_items.append(item)
 
     # Content & sender scoring
@@ -555,10 +570,11 @@ def check_url_get():
     if not url:
         return jsonify(error="missing 'url' query param"), 400
     item = score_url_t1(url, brand=brand)
-    proba_t2 = t2_score_url(url)
-    if proba_t2 is not None:
-        item["risk_t2"] = round(float(proba_t2), 2)
-        item["risk_blended"] = round(float(0.6 * item["risk"] + 0.4 * proba_t2), 2)
+    if not item.get("official", False):
+        proba_t2 = t2_score_url(url)
+        if proba_t2 is not None:
+            item["risk_t2"] = round(float(proba_t2), 2)
+            item["risk_blended"] = round(float(0.6 * item["risk"] + 0.4 * proba_t2), 2)
     return jsonify(item)
 
 if __name__ == "__main__":
