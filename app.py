@@ -66,7 +66,7 @@ PLATFORM_UGC_ETLD1 = {
     "dropbox.com",
     "notion.site", "notion.so",
     "wixsite.com",
-    "github.com",
+    "github.io",
     "medium.com", "substack.com",
 }
 
