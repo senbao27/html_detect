@@ -28,10 +28,13 @@ OFFICIAL_DOMAINS = {
     "vic.gov.au","nsw.gov.au","qld.gov.au","wa.gov.au","sa.gov.au","tas.gov.au","act.gov.au","nt.gov.au",
     # VIC universities
     "monash.edu","unimelb.edu.au","rmit.edu.au","deakin.edu.au","swinburne.edu.au","latrobe.edu.au",
+
     # Big tech / identity
     "apple.com","icloud.com","google.com","google.com.au","youtube.com",
     "microsoft.com","office.com","live.com","outlook.com",
     "facebook.com","instagram.com","whatsapp.com","twitter.com","x.com","tiktok.com","linkedin.com",
+    "github.com","githubusercontent.com","githubassets.com",  
+
     # Payments / e-commerce
     "paypal.com","stripe.com","squareup.com","afterpay.com","zip.co","amazon.com","amazon.com.au","ebay.com.au",
     # AU banks
