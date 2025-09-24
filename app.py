@@ -1,11 +1,8 @@
-# -*- coding: utf-8 -*-
 # Flask API (T1 rules + optional T2 model):
 # - URL scoring (offline lexical rules, refined UGC handling)
 # - Email HTML scoring: sender + content + URL blend  (/email/check)
 # - Plain-text message scoring: content + explicit URLs blend (/message/check)
-# - Optional T2 URL model auto-load (url_model.joblib) for lexical ML
 #
-# No external WHOIS/DNS/cert lookups are performed in this file.
 
 from flask import Flask, request, jsonify
 from urllib.parse import urlparse
@@ -16,7 +13,6 @@ import os
 
 app = Flask(__name__)
 
-# ---------------- First-party official domains (eTLD+1) ----------------
 # Any subdomain of a whitelisted eTLD+1 is considered official (unless UGC).
 OFFICIAL_DOMAINS = {
     # AU Federal & national services
@@ -52,17 +48,15 @@ OFFICIAL_DOMAINS = {
     "qantas.com","virginaustralia.com","jetstar.com","airnewzealand.com",
 }
 
-# ---------------- Trusted public-sector/education suffixes (B) ----------------
 # If an eTLD+1 ends with one of these suffixes, treat it as official (unless UGC).
 TRUSTED_PUBLIC_SUFFIXES = (".gov.au", ".edu.au", ".gov")
 
 def is_trusted_public_suffix(e1: str) -> bool:
     return any(e1.endswith(sfx) for sfx in TRUSTED_PUBLIC_SUFFIXES)
 
-# ---------------- UGC platforms (refined) ----------------
-# Keep eTLD+1 list STRICT (do NOT put "google.com" here to avoid over-blocking the homepage).
+# Keep eTLD+1 list STRICT 
 PLATFORM_UGC_ETLD1 = {
-    "forms.gle",        # Google Forms short links -> always UGC
+    "forms.gle",        
     "dropbox.com",
     "notion.site", "notion.so",
     "wixsite.com",
@@ -73,7 +67,7 @@ PLATFORM_UGC_ETLD1 = {
 # Google subdomains that host UGC. Treat as UGC only on these hosts.
 UGC_GOOGLE_HOSTS = {
     "docs.google.com",
-    "sites.google.com",   # site builder; treat as UGC regardless of path
+    "sites.google.com",   
     "drive.google.com",
 }
 
@@ -86,14 +80,13 @@ UGC_PATH_PATTERNS = [
     re.compile(r"^/file/d/"),
 ]
 
-# ---------------- Lexical risk signals ----------------
+#  Lexical risk signals
 RISK_WORDS = {
     "login","verify","update","secure","account","password","reset",
     "pay","refund","gift","free","suspend","unlock","confirm","bank","wallet"
 }
 SUSPICIOUS_TLDS = {"zip","top","xyz","gq","click","work","loan","cam","mom","bar","country"}
 
-# ---------------- Brand-like tokens (for similarity only; no user input) ----------------
 _tldx = tldextract.TLDExtract(suffix_list_urls=None)  # no PSL network fetch
 
 def tokens_from_officials(domains: set[str]) -> set[str]:
@@ -119,7 +112,6 @@ BRAND_TOKENS = tokens_from_officials(OFFICIAL_DOMAINS) | {
 }
 BRAND_TOKENS = {re.sub(r"[^a-z0-9]", "", t) for t in BRAND_TOKENS if t}
 
-# ---------------- Utils ----------------
 def etld1(host: str) -> str:
     ext = _tldx(host or "")
     return f"{ext.domain}.{ext.suffix}" if ext.suffix else (ext.domain or "")
@@ -149,11 +141,7 @@ def min_brand_similarity(hostname_core: str) -> float:
 def is_platform_ugc(host: str, e1: str, path: str) -> bool:
     """
     Return True if URL looks like UGC (user-generated content) hosted on a platform.
-    Rules:
-      - eTLD+1 in PLATFORM_UGC_ETLD1 -> UGC (e.g., forms.gle, github.io, notion.so)
-      - For Google, only specific subdomains are UGC (docs/sites/drive).
-        * sites.google.com -> always UGC
-        * docs/drive.google.com -> UGC when path matches known patterns
+    
     """
     if e1 in PLATFORM_UGC_ETLD1:
         return True
@@ -168,7 +156,7 @@ def is_platform_ugc(host: str, e1: str, path: str) -> bool:
 def subdomain_depth(host: str, e1: str) -> int:
     """
     Return number of subdomain labels before the eTLD+1, excluding common 'www'/'m'.
-    Example: foo.bar.example.com -> e1=example.com -> depth=2 ('foo','bar')
+
     """
     if not host or not e1:
         return 0
@@ -178,7 +166,7 @@ def subdomain_depth(host: str, e1: str) -> int:
     sub_labels = [x for x in sub_labels if x not in ("www", "m")]
     return len(sub_labels)
 
-# ---------------- Optional T2 model ----------------
+# Optional T2 model
 URL_MODEL = None
 try:
     from joblib import load as joblib_load
@@ -196,7 +184,7 @@ def t2_score_url(url: str):
     except Exception:
         return None
 
-# ---------------- Aggregation helpers (dynamic weights + hard gate) ----------------
+# dynamic weights + hard gate) 
 BASE_WEIGHTS = {"sender": 0.35, "content": 0.30, "url": 0.35}
 
 def aggregate_overall(sender_s: float, content_s: float, url_s: float,
@@ -222,7 +210,7 @@ def aggregate_overall(sender_s: float, content_s: float, url_s: float,
 
     return round(float(max(0.0, min(1.0, overall))), 2)
 
-# ---------------- T1 URL scoring ----------------
+# T1 URL scoring 
 def score_url_t1(url: str) -> dict:
     try:
         p = urlparse(url)
@@ -234,7 +222,7 @@ def score_url_t1(url: str) -> dict:
         reasons = []
         signals = {}
 
-        # UGC detection and "official" determination (whitelist OR trusted suffix), then early exit
+        # UGC detection and "official" determination whitepaper, then early exit
         ugc = is_platform_ugc(host, e1, p.path or "")
         official_by_whitelist = (e1 in OFFICIAL_DOMAINS)
         official_by_suffix   = is_trusted_public_suffix(e1)
@@ -349,7 +337,7 @@ def score_url_t1(url: str) -> dict:
             "reasons": [f"Parse error: {type(e).__name__}: {e}"]
         }
 
-# ---------------- Content & sender scoring (HTML emails) ----------------
+# Content & sender scoring (HTML emails) 
 ZW_CHARS = "[\u200b\u200c\u200d\u2060]"  # zero-width chars
 DOMAIN_RE = re.compile(r"\b([a-z0-9][a-z0-9\-\.]+\.[a-z]{2,})\b", re.I)
 
@@ -415,7 +403,7 @@ def content_score(html: str, url_items: list[dict]) -> dict:
     reasons = list(dict.fromkeys(reasons))
     return {"score": round(float(score), 2), "reasons": reasons, "links": links, "forms": forms}
 
-# ---------------- Content scoring for plain text ----------------
+#  Content scoring for plain text
 def content_score_text(content: str, url_items: list[dict]) -> dict:
     """Heuristics over plain-text content (no HTML parsing, no URL extraction)."""
     txt = (content or "")
@@ -444,7 +432,7 @@ def content_score_text(content: str, url_items: list[dict]) -> dict:
     reasons = list(dict.fromkeys(reasons))
     return {"score": round(float(score), 2), "reasons": reasons}
 
-# ---------------- Sender scoring (headers are optional) ----------------
+#  Sender scoring (headers are optional) 
 def sender_score(headers: dict) -> dict:
     """Score sender using common headers. If headers are absent, return neutral."""
     reasons = []
@@ -493,7 +481,7 @@ def sender_score(headers: dict) -> dict:
             "from": {"name": name, "email": email_addr, "etld1": from_e1},
             "reasons": reasons}
 
-# ---------------- Helpers ----------------
+#  Helpers 
 def ensure_http_url(u: str) -> str:
     """Add scheme if missing for 'www.' inputs; otherwise return as-is."""
     if not isinstance(u, str):
@@ -507,21 +495,21 @@ def ensure_http_url(u: str) -> str:
         return "http://" + u
     return u  # may be invalid; parser will handle
 
-# ---------------- API: health ----------------
+#  API: health 
 @app.get("/health")
 def health():
     return "ok", 200
 
-# ---------------- API: email check (HTML) ----------------
+#  API: email check (HTML) 
 @app.post("/email/check")
 def email_check():
     """
     Request JSON:
     {
-      "html": "<html>...</html>",          // required
-      "headers": {"From":"...", ...}       // optional but recommended
+      "html": "<html>...</html>",          
+      "headers": {"From":"...", ...}       
     }
-    HTML parsing extracts <a href> and <form>. This endpoint is for HTML emails/pages.
+
     """
     data = request.get_json(silent=True) or {}
     html = data.get("html", "")
@@ -574,7 +562,7 @@ def email_check():
         "urls": url_items
     })
 
-# ---------------- API: single URL check ----------------
+#  API: single URL check 
 @app.get("/check")
 def check_url_get():
     """
@@ -592,7 +580,7 @@ def check_url_get():
             item["risk_blended"] = round(float(0.6 * item["risk"] + 0.4 * proba_t2), 2)
     return jsonify(item)
 
-# ---------------- API: plain-text message check (NO URL extraction) ----------------
+# - API: plain-text message check (NO URL extraction)
 @app.post("/message/check")
 def message_check():
     """
@@ -603,13 +591,7 @@ def message_check():
       "urls": ["https://...", "..."],         // optional
       "headers": {"From":"...", ...}          // optional
     }
-    Behavior:
-      - This endpoint DOES NOT extract URLs from content.
-      - If you want URLs scored, pass them explicitly via `url` or `urls`.
-      - Works with:
-          (1) content + one/many URLs,
-          (2) URLs only,
-          (3) content only.
+    
     """
     data = request.get_json(silent=True) or {}
     content_txt = data.get("content") or ""
